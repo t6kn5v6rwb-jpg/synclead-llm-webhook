@@ -25,7 +25,81 @@ function getBase44Client() {
 }
 
 app.get("/health", (_req, res) => {
+  console.log("Health check hit");
   res.json({ ok: true });
+});
+
+app.get("/debug/env", (_req, res) => {
+  console.log("Debug env check hit");
+  res.json({
+    ok: true,
+    hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
+    hasBase44AppId: Boolean(process.env.BASE44_APP_ID),
+    hasBase44ApiKey: Boolean(process.env.BASE44_API_KEY),
+    base44AppIdPreview: process.env.BASE44_APP_ID
+      ? `${process.env.BASE44_APP_ID.slice(0, 6)}...${process.env.BASE44_APP_ID.slice(-4)}`
+      : null,
+    clientBusinessName: process.env.CLIENT_BUSINESS_NAME || process.env.BUSINESS_NAME || null,
+    clientIndustry: process.env.CLIENT_INDUSTRY || null
+  });
+});
+
+app.get("/debug/base44", async (_req, res) => {
+  console.log("Direct Base44 diagnostic hit");
+  try {
+    const base44 = getBase44Client();
+
+    if (!base44) {
+      console.log("Direct Base44 diagnostic failed: missing env vars", {
+        hasBase44AppId: Boolean(process.env.BASE44_APP_ID),
+        hasBase44ApiKey: Boolean(process.env.BASE44_API_KEY)
+      });
+
+      return res.status(500).json({
+        ok: false,
+        error: "Missing BASE44_APP_ID or BASE44_API_KEY in Render environment variables.",
+        hasBase44AppId: Boolean(process.env.BASE44_APP_ID),
+        hasBase44ApiKey: Boolean(process.env.BASE44_API_KEY)
+      });
+    }
+
+    const payload = {
+      customer_name: "Render Base44 Test",
+      customer_phone: "+16047005142",
+      business_name: process.env.CLIENT_BUSINESS_NAME || process.env.BUSINESS_NAME || "Demo Plumbing Company",
+      service_needed: "Diagnostic test lead created directly from Render",
+      urgency: "medium",
+      message_summary: "This is a diagnostic test to prove Render can create Base44 Lead records.",
+      full_conversation: "system: Direct /debug/base44 test endpoint was opened.",
+      status: "new",
+      source: "Render Diagnostic",
+      notes: "If this appears in Base44, Render to Base44 works and the remaining issue is Twilio routing.",
+      created_at: new Date().toISOString()
+    };
+
+    console.log("Attempting direct Base44 diagnostic create", {
+      customerPhone: payload.customer_phone,
+      businessName: payload.business_name
+    });
+
+    const createdLead = await base44.entities.Lead.create(payload);
+
+    console.log("Direct Base44 diagnostic created lead", {
+      id: createdLead?.id || createdLead?._id || null
+    });
+
+    return res.json({
+      ok: true,
+      message: "Created diagnostic Lead in Base44. Check the app Leads page.",
+      createdLeadId: createdLead?.id || createdLead?._id || null
+    });
+  } catch (error) {
+    console.error("Direct Base44 diagnostic failed", error);
+    return res.status(500).json({
+      ok: false,
+      error: error?.message || String(error)
+    });
+  }
 });
 
 app.post("/twilio/sms", async (req, res) => {
