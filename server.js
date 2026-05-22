@@ -134,9 +134,7 @@ Return ONLY valid JSON in this exact shape:
     history.push({ role: "assistant", content: reply });
     conversations.set(conversationKey, history.slice(-20));
 
-    if (parsed.lead_ready || parsed.handoff_required) {
-      await sendLeadToBase44({ from, history, parsed });
-    }
+    await sendLeadToBase44({ from, history, parsed, initialMessage: body });
 
     return res.json({ reply });
   } catch (error) {
@@ -147,7 +145,7 @@ Return ONLY valid JSON in this exact shape:
   }
 });
 
-async function sendLeadToBase44({ from, history, parsed }) {
+async function sendLeadToBase44({ from, history, parsed, initialMessage }) {
   const base44 = getBase44Client();
 
   if (!base44) {
@@ -160,13 +158,17 @@ async function sendLeadToBase44({ from, history, parsed }) {
     customer_name: lead.customer_name || "Unknown",
     customer_phone: lead.customer_phone || from,
     business_name: lead.business_name || process.env.CLIENT_BUSINESS_NAME || process.env.BUSINESS_NAME || "",
-    service_needed: lead.service_needed || "",
+    service_needed: lead.service_needed || initialMessage || "New SMS inquiry",
     urgency: normalizeUrgency(lead.urgency),
-    message_summary: lead.message_summary || "",
+    message_summary: lead.message_summary || initialMessage || "New SMS inquiry received.",
     full_conversation: history.map((m) => `${m.role}: ${m.content}`).join("\n"),
     status: "new",
     source: "Twilio SMS LLM",
-    notes: parsed.handoff_required ? "Handoff required" : "Created by LLM intake",
+    notes: parsed.handoff_required
+      ? "Handoff required"
+      : parsed.lead_ready
+        ? "Qualified by LLM intake"
+        : "New inbound SMS - AI is still qualifying this lead",
     created_at: new Date().toISOString()
   };
 
