@@ -24,6 +24,26 @@ function getBase44Client() {
   });
 }
 
+function escapeXml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function respondToTwilio(req, res, reply) {
+  const isDirectTwilioWebhook = Boolean(req.body.From || req.body.Body || req.body.MessageSid);
+
+  if (isDirectTwilioWebhook) {
+    res.set("Content-Type", "text/xml");
+    return res.status(200).send(`<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escapeXml(reply)}</Message></Response>`);
+  }
+
+  return res.json({ reply });
+}
+
 app.get("/health", (_req, res) => {
   console.log("Health check hit");
   res.json({ ok: true });
@@ -117,7 +137,7 @@ app.post("/twilio/sms", async (req, res) => {
     });
 
     if (!from || !body) {
-      return res.status(400).json({ reply: "Sorry, I could not read that message." });
+      return respondToTwilio(req, res, "Sorry, I could not read that message.");
     }
 
     const conversationKey = `${to}:${from}`;
@@ -224,12 +244,10 @@ Return ONLY valid JSON in this exact shape:
 
     await sendLeadToBase44({ from, history, parsed, initialMessage: body });
 
-    return res.json({ reply });
+    return respondToTwilio(req, res, reply);
   } catch (error) {
     console.error("SMS webhook error:", error);
-    return res.status(200).json({
-      reply: "Thanks for reaching out. I’m sending this to the team now so someone can follow up."
-    });
+    return respondToTwilio(req, res, "Thanks for reaching out. I’m sending this to the team now so someone can follow up.");
   }
 });
 
