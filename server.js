@@ -34,6 +34,14 @@ app.post("/twilio/sms", async (req, res) => {
     const to = req.body.To || req.body.to;
     const body = req.body.Body || req.body.body || "";
 
+    console.log("Inbound SMS received", {
+      from,
+      to,
+      bodyPreview: body.slice(0, 120),
+      hasBase44AppId: Boolean(process.env.BASE44_APP_ID),
+      hasBase44ApiKey: Boolean(process.env.BASE44_API_KEY)
+    });
+
     if (!from || !body) {
       return res.status(400).json({ reply: "Sorry, I could not read that message." });
     }
@@ -131,6 +139,12 @@ Return ONLY valid JSON in this exact shape:
     const parsed = JSON.parse(raw);
     const reply = parsed.reply || "Thanks — can you tell me a bit more about what you need help with?";
 
+    console.log("AI reply generated", {
+      replyPreview: reply.slice(0, 120),
+      leadReady: parsed.lead_ready,
+      handoffRequired: parsed.handoff_required
+    });
+
     history.push({ role: "assistant", content: reply });
     conversations.set(conversationKey, history.slice(-20));
 
@@ -149,7 +163,10 @@ async function sendLeadToBase44({ from, history, parsed, initialMessage }) {
   const base44 = getBase44Client();
 
   if (!base44) {
-    console.log("Base44 env vars missing, skipping Base44 lead push.");
+    console.log("Base44 env vars missing, skipping Base44 lead push.", {
+      hasBase44AppId: Boolean(process.env.BASE44_APP_ID),
+      hasBase44ApiKey: Boolean(process.env.BASE44_API_KEY)
+    });
     return;
   }
 
@@ -172,7 +189,21 @@ async function sendLeadToBase44({ from, history, parsed, initialMessage }) {
     created_at: new Date().toISOString()
   };
 
-  await base44.entities.Lead.create(payload);
+  console.log("Attempting Base44 lead create", {
+    customerPhone: payload.customer_phone,
+    businessName: payload.business_name,
+    serviceNeededPreview: payload.service_needed.slice(0, 120)
+  });
+
+  try {
+    const createdLead = await base44.entities.Lead.create(payload);
+    console.log("Base44 lead created successfully", {
+      id: createdLead?.id || createdLead?._id || null,
+      customerPhone: payload.customer_phone
+    });
+  } catch (error) {
+    console.error("Base44 lead create failed", error);
+  }
 }
 
 function normalizeUrgency(value) {
