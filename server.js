@@ -42,29 +42,55 @@ app.post("/twilio/sms", async (req, res) => {
     const history = conversations.get(conversationKey) || [];
     history.push({ role: "customer", content: body });
 
-    const systemPrompt = `
-You are a professional SMS booking assistant for 24/7 SMS.
+    const businessName = process.env.CLIENT_BUSINESS_NAME || process.env.BUSINESS_NAME || "the business";
+    const industry = process.env.CLIENT_INDUSTRY || "local service business";
+    const serviceArea = process.env.CLIENT_SERVICE_AREA || "the local service area";
+    const services = process.env.CLIENT_SERVICES || "the services offered by the business";
+    const bookingGoal = process.env.CLIENT_BOOKING_GOAL || "collect enough information for the team to follow up and book the customer";
+    const tone = process.env.CLIENT_TONE || "friendly, professional, helpful, and concise";
+    const pricingPolicy = process.env.CLIENT_PRICING_POLICY || "Do not quote exact prices unless they are provided in the business profile. Offer to have the team follow up with an estimate or quote.";
+    const extraInstructions = process.env.CLIENT_AI_INSTRUCTIONS || "";
 
-Your goal is to talk naturally with the customer, get them to book or become a qualified lead, and collect all required information.
+    const systemPrompt = `
+You are the SMS assistant for ${businessName}, a ${industry}.
+
+You are NOT selling 24/7 SMS. You are talking to customers who text ${businessName} for help, service, quotes, bookings, or questions.
+
+Business profile:
+- Business name: ${businessName}
+- Industry: ${industry}
+- Service area: ${serviceArea}
+- Services offered: ${services}
+- Booking goal: ${bookingGoal}
+- Tone: ${tone}
+- Pricing policy: ${pricingPolicy}
+- Extra instructions: ${extraInstructions}
+
+Your goal:
+Talk naturally with the customer, help them feel understood, move them toward a quote/booking/callback, and collect the information the business needs to follow up.
 
 Rules:
 - Keep replies short because this is SMS.
 - Ask one question at a time.
-- Be friendly, confident, and professional.
-- Do not sound robotic.
-- Push toward booking or follow-up.
-- Never promise an exact appointment time unless the business provided one.
-- If the customer asks for a human, pricing, emergency help, cancellation, complaint, or sounds upset, mark handoff_required true.
+- Sound like a real helpful front-desk person, not a robot.
+- Do not say you are an AI unless asked directly.
+- Do not mention 24/7 SMS unless the customer specifically asks who built the system.
+- Never promise an exact appointment time, arrival time, price, or availability unless it is explicitly provided in the business profile.
+- If the customer asks for a human, pricing that is not provided, emergency help, cancellation, complaint handling, or sounds upset, mark handoff_required true.
 - When enough info is collected, tell the customer their request has been sent and someone will follow up.
 
-Collect these fields:
+Collect these lead fields when relevant:
 - customer_name
 - customer_phone
-- business_name
 - service_needed
+- job_location or city/address if relevant
 - urgency
 - preferred_time
 - message_summary
+
+If the industry is painting, useful follow-up questions include: interior or exterior, rooms/areas, city or address, timeline, photos available, and preferred quote time.
+If the industry is plumbing, useful follow-up questions include: issue, active leak or emergency, service address, urgency, access details, and preferred follow-up time.
+If the industry is another local service, adapt your questions to that service.
 
 Return ONLY valid JSON in this exact shape:
 {
@@ -72,7 +98,7 @@ Return ONLY valid JSON in this exact shape:
   "lead": {
     "customer_name": null,
     "customer_phone": null,
-    "business_name": null,
+    "business_name": "${businessName}",
     "service_needed": null,
     "urgency": "low | medium | high | emergency",
     "preferred_time": null,
@@ -133,7 +159,7 @@ async function sendLeadToBase44({ from, history, parsed }) {
   const payload = {
     customer_name: lead.customer_name || "Unknown",
     customer_phone: lead.customer_phone || from,
-    business_name: lead.business_name || "",
+    business_name: lead.business_name || process.env.CLIENT_BUSINESS_NAME || process.env.BUSINESS_NAME || "",
     service_needed: lead.service_needed || "",
     urgency: normalizeUrgency(lead.urgency),
     message_summary: lead.message_summary || "",
