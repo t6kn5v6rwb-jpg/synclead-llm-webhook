@@ -22,6 +22,21 @@ function cleanPhone(value) {
   return String(value || "").replace(/[^0-9+]/g, "");
 }
 
+// Bare digits for matching two numbers regardless of formatting.
+// "+1 (236) 205-2045" -> "2362052045"
+function digitsOnly(value) {
+  let d = String(value || "").replace(/\D/g, "");
+  if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
+  return d;
+}
+
+// Canonical E.164 for storage. "2362052045" -> "+12362052045"
+function toE164(value) {
+  const d = digitsOnly(value);
+  if (d.length === 10) return `+1${d}`;
+  return value ? String(value).trim() : "";
+}
+
 function asText(value) {
   if (Array.isArray(value)) return value.join(", ");
   if (value && typeof value === "object") return JSON.stringify(value);
@@ -59,6 +74,7 @@ async function getBusinessProfile(twilioNumber) {
     faqs: "",
     tone: process.env.CLIENT_TONE || "friendly, professional, helpful, and concise",
     ai_instructions: process.env.CLIENT_AI_INSTRUCTIONS || "",
+    owner_email: "",
     twilio_number: twilioNumber || ""
   };
 
@@ -70,9 +86,13 @@ async function getBusinessProfile(twilioNumber) {
 
     if (base44.entities?.Business?.filter) {
       records = await base44.entities.Business.filter({ twilio_number: twilioNumber }, "-updated_date", 1);
-    } else if (base44.entities?.Business?.list) {
+    }
+
+    // If exact-match filter found nothing, fall back to a tolerant digits match
+    // so stored format differences (dashes, spaces, missing +1) still resolve.
+    if ((!records || records.length === 0) && base44.entities?.Business?.list) {
       const all = await base44.entities.Business.list("-updated_date", 100);
-      records = all.filter((b) => cleanPhone(b.twilio_number) === cleanPhone(twilioNumber));
+      records = all.filter((b) => digitsOnly(b.twilio_number) === digitsOnly(twilioNumber));
     }
 
     if (!records || records.length === 0) {
@@ -83,7 +103,8 @@ async function getBusinessProfile(twilioNumber) {
     const business = records[0];
     console.log("Loaded Base44 Business profile", {
       businessName: business.business_name || business.name,
-      twilioNumber: business.twilio_number
+      twilioNumber: business.twilio_number,
+      ownerEmail: business.owner_email
     });
 
     return {
@@ -94,7 +115,10 @@ async function getBusinessProfile(twilioNumber) {
       hours: business.hours || business.business_hours || fallback.hours,
       booking_goal: business.booking_goal || business.booking_instructions || fallback.booking_goal,
       pricing_policy: business.pricing_policy || business.pricing_notes || fallback.pricing_policy,
-      ai_instructions: business.ai_instructions || business.urgent_alert_rules || fallback.ai_instructions
+      ai_instructions: business.ai_instructions || business.urgent_alert_rules || fallback.ai_instructions,
+      // tenant routing + access control fields
+      owner_email: business.owner_email || fallback.owner_email,
+      twilio_number: toE164(business.twilio_number || twilioNumber)
     };
   } catch (error) {
     console.error("Failed to load Base44 Business profile, using fallback env profile", {
@@ -115,31 +139,6 @@ app.get("/debug/env", (_req, res) => {
     hasBase44ApiKey: Boolean(process.env.BASE44_API_KEY),
     clientBusinessName: process.env.CLIENT_BUSINESS_NAME || process.env.BUSINESS_NAME || null
   });
-});
-
-app.get("/debug/base44", async (_req, res) => {
-  try {
-    const base44 = getBase44Client();
-    if (!base44) return res.status(500).json({ ok: false, error: "Missing Base44 env vars" });
-
-    const createdLead = await base44.entities.Lead.create({
-      customer_name: "Render Base44 Test",
-      customer_phone: "+16047005142",
-      business_name: "Render Diagnostic",
-      service_needed: "Diagnostic test lead created directly from Render",
-      urgency: "medium",
-      message_summary: "Render can create Base44 Lead records.",
-      full_conversation: "system: /debug/base44 test endpoint was opened.",
-      status: "new",
-      source: "Render Diagnostic",
-      notes: "Diagnostic test lead.",
-      created_at: new Date().toISOString()
-    });
-
-    return res.json({ ok: true, createdLeadId: createdLead?.id || createdLead?._id || null });
-  } catch (error) {
-    return res.status(500).json({ ok: false, error: error?.message || String(error) });
-  }
 });
 
 app.get("/debug/business", async (req, res) => {
@@ -269,6 +268,10 @@ async function sendLeadToBase44({ from, history, parsed, initialMessage, busines
     customer_name: lead.customer_name || "Unknown",
     customer_phone: lead.customer_phone || from,
     business_name: lead.business_name || business?.business_name || business?.name || "",
+    // --- tenant routing + access control: these are what make leads visible in the app ---
+    owner_email: business?.owner_email || "",
+    twilio_number: business?.twilio_number || "",
+    // ------------------------------------------------------------------------------------
     service_needed: lead.service_needed || initialMessage || "New SMS inquiry",
     urgency: normalizeUrgency(lead.urgency),
     message_summary: lead.message_summary || initialMessage || "New SMS inquiry received.",
@@ -279,9 +282,20 @@ async function sendLeadToBase44({ from, history, parsed, initialMessage, busines
     created_at: new Date().toISOString()
   };
 
+  if (!payload.owner_email) {
+    console.warn("Lead has no owner_email — the Business for this Twilio number is missing owner_email in Base44. Lead will not be visible until that business has an owner_email set.", {
+      twilio_number: payload.twilio_number,
+      business_name: payload.business_name
+    });
+  }
+
   try {
     const createdLead = await base44.entities.Lead.create(payload);
-    console.log("Base44 lead created successfully", { id: createdLead?.id || createdLead?._id || null });
+    console.log("Base44 lead created successfully", {
+      id: createdLead?.id || createdLead?._id || null,
+      owner_email: payload.owner_email,
+      twilio_number: payload.twilio_number
+    });
   } catch (error) {
     console.error("Base44 lead create failed", error);
   }
