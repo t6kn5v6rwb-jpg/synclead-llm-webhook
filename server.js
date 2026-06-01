@@ -256,6 +256,38 @@ Return ONLY valid JSON in this exact shape:
   }
 });
 
+// Find the existing open lead for this conversation (same business number + same
+// customer phone), so we UPDATE one record per chat instead of creating a new
+// lead on every inbound text. Only "open" statuses are reused; a closed lead
+// (booked/lost/spam) won't be reopened — a genuinely new inquiry starts fresh.
+const OPEN_STATUSES = ["new", "contacted"];
+
+async function findExistingLead(base44, twilioNumber, customerPhone) {
+  if (!twilioNumber || !customerPhone) return null;
+  try {
+    let candidates = [];
+    if (base44.entities?.Lead?.filter) {
+      candidates = await base44.entities.Lead.filter(
+        { twilio_number: twilioNumber, customer_phone: customerPhone },
+        "-created_date",
+        10
+      );
+    } else if (base44.entities?.Lead?.list) {
+      const all = await base44.entities.Lead.list("-created_date", 100);
+      candidates = all.filter(
+        (l) =>
+          digitsOnly(l.twilio_number) === digitsOnly(twilioNumber) &&
+          digitsOnly(l.customer_phone) === digitsOnly(customerPhone)
+      );
+    }
+    // Most recent still-open lead for this conversation.
+    return candidates.find((l) => OPEN_STATUSES.includes(String(l.status || "new").toLowerCase())) || null;
+  } catch (error) {
+    console.error("findExistingLead failed, will create a new lead instead", { message: error?.message });
+    return null;
+  }
+}
+
 async function sendLeadToBase44({ from, history, parsed, initialMessage, business }) {
   const base44 = getBase44Client();
   if (!base44) {
@@ -264,40 +296,64 @@ async function sendLeadToBase44({ from, history, parsed, initialMessage, busines
   }
 
   const lead = parsed.lead || {};
-  const payload = {
-    customer_name: lead.customer_name || "Unknown",
-    customer_phone: lead.customer_phone || from,
-    business_name: lead.business_name || business?.business_name || business?.name || "",
-    // --- tenant routing + access control: these are what make leads visible in the app ---
-    owner_email: business?.owner_email || "",
-    twilio_number: business?.twilio_number || "",
-    // ------------------------------------------------------------------------------------
-    service_needed: lead.service_needed || initialMessage || "New SMS inquiry",
-    urgency: normalizeUrgency(lead.urgency),
-    message_summary: lead.message_summary || initialMessage || "New SMS inquiry received.",
-    full_conversation: history.map((m) => `${m.role}: ${m.content}`).join("\n"),
-    status: "new",
-    source: "Twilio SMS LLM",
-    notes: parsed.handoff_required ? "Handoff required" : "New inbound SMS - AI is still qualifying this lead",
-    created_at: new Date().toISOString()
-  };
+  const ownerEmail = business?.owner_email || "";
+  const twilioNumber = business?.twilio_number || "";
+  const customerPhone = lead.customer_phone || from;
+  const fullConversation = history.map((m) => `${m.role}: ${m.content}`).join("\n");
 
-  if (!payload.owner_email) {
+  if (!ownerEmail) {
     console.warn("Lead has no owner_email — the Business for this Twilio number is missing owner_email in Base44. Lead will not be visible until that business has an owner_email set.", {
-      twilio_number: payload.twilio_number,
-      business_name: payload.business_name
+      twilio_number: twilioNumber,
+      business_name: lead.business_name || business?.business_name
     });
   }
 
+  // Fields that should refresh as the conversation develops.
+  const updatable = {
+    customer_name: lead.customer_name || undefined,
+    business_name: lead.business_name || business?.business_name || business?.name || "",
+    owner_email: ownerEmail,
+    twilio_number: twilioNumber,
+    service_needed: lead.service_needed || undefined,
+    urgency: normalizeUrgency(lead.urgency),
+    message_summary: lead.message_summary || initialMessage || "New SMS inquiry received.",
+    full_conversation: fullConversation,
+    source: "Twilio SMS LLM",
+    notes: parsed.handoff_required ? "Handoff required" : "New inbound SMS - AI is still qualifying this lead"
+  };
+  // Strip undefined so we never overwrite a known value with a blank.
+  Object.keys(updatable).forEach((k) => updatable[k] === undefined && delete updatable[k]);
+
   try {
-    const createdLead = await base44.entities.Lead.create(payload);
-    console.log("Base44 lead created successfully", {
-      id: createdLead?.id || createdLead?._id || null,
-      owner_email: payload.owner_email,
-      twilio_number: payload.twilio_number
+    const existing = await findExistingLead(base44, twilioNumber, customerPhone);
+
+    if (existing) {
+      const id = existing.id || existing._id;
+      const updated = await base44.entities.Lead.update(id, updatable);
+      console.log("Base44 lead UPDATED (one lead per conversation)", {
+        id,
+        owner_email: ownerEmail,
+        twilio_number: twilioNumber
+      });
+      return updated;
+    }
+
+    const createdLead = await base44.entities.Lead.create({
+      ...updatable,
+      customer_name: updatable.customer_name || "Unknown",
+      customer_phone: customerPhone,
+      service_needed: updatable.service_needed || initialMessage || "New SMS inquiry",
+      status: "new",
+      created_at: new Date().toISOString()
     });
+    console.log("Base44 lead CREATED (new conversation)", {
+      id: createdLead?.id || createdLead?._id || null,
+      owner_email: ownerEmail,
+      twilio_number: twilioNumber
+    });
+    return createdLead;
   } catch (error) {
-    console.error("Base44 lead create failed", error);
+    console.error("Base44 lead upsert failed", error);
   }
 }
 
