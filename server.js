@@ -262,6 +262,15 @@ Return ONLY valid JSON in this exact shape:
 // (booked/lost/spam) won't be reopened — a genuinely new inquiry starts fresh.
 const OPEN_STATUSES = ["new", "contacted"];
 
+// How long an open lead counts as "the same conversation". A new inbound text
+// from the same customer AFTER this window starts a FRESH lead instead of
+// reopening the old one — so a repeat customer (new job weeks/months later)
+// becomes a new lead instead of overwriting their previous one. Tune via env
+// (DEDUP_WINDOW_HOURS) with no code change. 48h default suits trades with
+// multi-day back-and-forth (text Monday, reply Thursday still = one job).
+const DEDUP_WINDOW_HOURS = Number(process.env.DEDUP_WINDOW_HOURS || 48);
+const DEDUP_WINDOW_MS = DEDUP_WINDOW_HOURS * 60 * 60 * 1000;
+
 async function findExistingLead(base44, twilioNumber, customerPhone) {
   if (!twilioNumber || !customerPhone) return null;
   try {
@@ -269,19 +278,49 @@ async function findExistingLead(base44, twilioNumber, customerPhone) {
     if (base44.entities?.Lead?.filter) {
       candidates = await base44.entities.Lead.filter(
         { twilio_number: twilioNumber, customer_phone: customerPhone },
-        "-created_date",
+        "-updated_date",
         10
       );
     } else if (base44.entities?.Lead?.list) {
-      const all = await base44.entities.Lead.list("-created_date", 100);
+      const all = await base44.entities.Lead.list("-updated_date", 100);
       candidates = all.filter(
         (l) =>
           digitsOnly(l.twilio_number) === digitsOnly(twilioNumber) &&
           digitsOnly(l.customer_phone) === digitsOnly(customerPhone)
       );
     }
-    // Most recent still-open lead for this conversation.
-    return candidates.find((l) => OPEN_STATUSES.includes(String(l.status || "new").toLowerCase())) || null;
+
+    // Only still-open leads can be reused.
+    const openCandidates = candidates.filter((l) =>
+      OPEN_STATUSES.includes(String(l.status || "new").toLowerCase())
+    );
+    if (openCandidates.length === 0) return null;
+
+    // Pick the genuinely most-recently-active open lead (don't trust list order).
+    openCandidates.sort(
+      (a, b) =>
+        new Date(b.updated_date || b.created_date || 0) -
+        new Date(a.updated_date || a.created_date || 0)
+    );
+    const mostRecent = openCandidates[0];
+
+    // The window decision: recent activity = same conversation, so update it.
+    // Stale = treat this text as a new job and force a fresh lead (return null).
+    const lastActivity = new Date(
+      mostRecent.updated_date || mostRecent.created_date || 0
+    ).getTime();
+
+    if (Date.now() - lastActivity >= DEDUP_WINDOW_MS) {
+      console.log("Most recent open lead is older than dedup window — creating a NEW lead", {
+        twilio_number: twilioNumber,
+        customer_phone: customerPhone,
+        last_activity: mostRecent.updated_date || mostRecent.created_date,
+        window_hours: DEDUP_WINDOW_HOURS
+      });
+      return null;
+    }
+
+    return mostRecent;
   } catch (error) {
     console.error("findExistingLead failed, will create a new lead instead", { message: error?.message });
     return null;
