@@ -327,6 +327,59 @@ async function findExistingLead(base44, twilioNumber, customerPhone) {
   }
 }
 
+// Text the business owner when a NEW lead comes in. Uses Twilio's REST API
+// directly via fetch (no extra dependency). Reads credentials from Render env.
+// Wrapped so any failure here NEVER blocks the lead from being saved.
+async function notifyOwnerOfNewLead({ business, lead, customerPhone, twilioNumber }) {
+  const sid = process.env.TWILIO_ACCOUNT_SID;
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  const ownerPhone = business?.owner_phone;
+
+  if (!sid || !token) {
+    console.log("Owner SMS alert skipped: Twilio credentials not set in env.");
+    return;
+  }
+  if (!ownerPhone) {
+    console.log("Owner SMS alert skipped: business has no owner_phone.", {
+      business_name: business?.business_name
+    });
+    return;
+  }
+  if (!twilioNumber) {
+    console.log("Owner SMS alert skipped: no twilio_number to send from.");
+    return;
+  }
+
+  const service = lead.service_needed || lead.message_summary || "new inquiry";
+  const bizName = business?.business_name || "your business";
+  const body = `New lead for ${bizName}. ${service}. From ${customerPhone}. Open your app to view and reply.`;
+
+  try {
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`;
+    const params = new URLSearchParams({ To: ownerPhone, From: twilioNumber, Body: body });
+    const auth = Buffer.from(`${sid}:${token}`).toString("base64");
+
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${auth}`,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: params.toString()
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error("Owner SMS alert failed (lead still saved)", { status: resp.status, errText });
+      return;
+    }
+    console.log("Owner SMS alert sent", { to: ownerPhone, business_name: bizName });
+  } catch (error) {
+    // A notification failure must NEVER block or break the lead write.
+    console.error("Owner SMS alert threw (lead still saved)", { message: error?.message });
+  }
+}
+
 async function sendLeadToBase44({ from, history, parsed, initialMessage, business }) {
   const base44 = getBase44Client();
   if (!base44) {
@@ -390,6 +443,11 @@ async function sendLeadToBase44({ from, history, parsed, initialMessage, busines
       owner_email: ownerEmail,
       twilio_number: twilioNumber
     });
+
+    // Fire the owner alert ONLY for newly created leads (not updates), so the
+    // owner gets one text per new conversation, not on every back-and-forth.
+    await notifyOwnerOfNewLead({ business, lead, customerPhone, twilioNumber });
+
     return createdLead;
   } catch (error) {
     console.error("Base44 lead upsert failed", error);
