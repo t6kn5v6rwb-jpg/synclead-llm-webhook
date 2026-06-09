@@ -256,6 +256,81 @@ Return ONLY valid JSON in this exact shape:
   }
 });
 
+// ===== MISSED-CALL TEXT-BACK =====
+// A call hits the Twilio number -> caller hears a short message -> we hang up
+// and immediately text them back from the same number. When they reply, the
+// reply lands on /twilio/sms above and the existing AI pipeline takes over.
+const recentCallTexts = new Map(); // caller digits -> timestamp, one text per caller per hour
+
+app.post("/twilio/voice", async (req, res) => {
+  const caller = req.body.From;
+  const twilioNum = req.body.To;
+
+  console.log("Inbound CALL received", { caller, twilioNum });
+
+  // Answer Twilio immediately so the call never times out.
+  res.type("text/xml").send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Sorry we missed you. We are texting you right now.</Say>
+  <Hangup/>
+</Response>`);
+
+  try {
+    if (!caller || !twilioNum) return;
+
+    // Skip non-textable callers (blocked/anonymous/short codes).
+    if (digitsOnly(caller).length < 10) {
+      console.log("Missed-call text-back skipped: caller not textable", { caller });
+      return;
+    }
+
+    // One text-back per caller per hour (keyed on digits so formatting can't dodge it).
+    const key = `${digitsOnly(twilioNum)}:${digitsOnly(caller)}`;
+    const last = recentCallTexts.get(key);
+    if (last && Date.now() - last < 3600000) {
+      console.log("Missed-call text-back skipped: already texted within the hour", { caller });
+      return;
+    }
+    recentCallTexts.set(key, Date.now());
+
+    const sid = process.env.TWILIO_ACCOUNT_SID;
+    const token = process.env.TWILIO_AUTH_TOKEN;
+    if (!sid || !token) {
+      console.log("Missed-call text-back skipped: Twilio credentials not set in env.");
+      return;
+    }
+
+    const business = await getBusinessProfile(twilioNum);
+    const bizName = business.business_name || "the business";
+
+    const url = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`;
+    const params = new URLSearchParams({
+      To: toE164(caller),
+      From: toE164(twilioNum),
+      Body: `Hey, sorry we missed your call! This is ${bizName}. What do you need help with? Reply here and we'll get you sorted right away.`
+    });
+    const auth = Buffer.from(`${sid}:${token}`).toString("base64");
+
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${auth}`,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: params.toString()
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error("Missed-call text-back FAILED", { status: resp.status, errText });
+      return;
+    }
+    console.log("Missed-call text-back SENT", { to: caller, business_name: bizName });
+  } catch (error) {
+    console.error("Missed-call text-back error", { message: error?.message });
+  }
+});
+
 // Find the existing open lead for this conversation (same business number + same
 // customer phone), so we UPDATE one record per chat instead of creating a new
 // lead on every inbound text. Only "open" statuses are reused; a closed lead
